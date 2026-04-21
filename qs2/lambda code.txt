@@ -1,0 +1,89 @@
+import boto3
+import csv
+import datetime
+from io import StringIO
+import pymysql
+
+s3 = boto3.client('s3')
+sns = boto3.client('sns')
+
+def lambda_handler(event, context):
+
+    # Get bucket and file key
+    bucket = event['Records'][0]['s3']['bucket']['name']
+    key = event['Records'][0]['s3']['object']['key']
+
+    print("File received:", key)
+
+    # 🚫 Skip already processed files
+    if key.startswith("processed/"):
+        print("Skipping processed file")
+        return "Skipped"
+
+    try:
+        # Read file from S3
+        obj = s3.get_object(Bucket=bucket, Key=key)
+        data = obj['Body'].read().decode('utf-8').splitlines()
+
+        reader = csv.reader(data)
+        output = StringIO()
+        writer = csv.writer(output)
+
+        # Read header
+        header = next(reader)
+        header.append("processed_timestamp")
+        writer.writerow(header)
+
+        # 🔥 CONNECT TO RDS
+        connection = pymysql.connect(
+            host='etl-db1.cnm4wm222vfn.us-east-1.rds.amazonaws.com',
+            user='admin',
+            password='yash2523',
+            database='etl_db'
+        )
+
+        with connection.cursor() as cursor:
+
+            for row in reader:
+                # Add timestamp
+                timestamp = str(datetime.datetime.now())
+                row.append(timestamp)
+
+                # Write to processed file
+                writer.writerow(row)
+
+                # 🔥 Insert into DB
+                cursor.execute(
+                    "INSERT INTO users_data (id, name, email, processed_timestamp) VALUES (%s, %s, %s, %s)",
+                    (row[0], row[1], row[2], row[3])
+                )
+
+        connection.commit()
+        connection.close()
+
+        # Save processed file
+        filename = key.split("/")[-1]
+        processed_key = f"processed/{filename}"
+
+        s3.put_object(
+            Bucket=bucket,
+            Key=processed_key,
+            Body=output.getvalue()
+        )
+
+        print("File saved to:", processed_key)
+
+        # 🔔 Send SNS notification
+        sns.publish(
+            TopicArn='YOUR_SNS_TOPIC_ARN',
+            Subject='ETL Success',
+            Message=f'File {filename} processed and stored in database!'
+        )
+
+        print("SNS sent")
+
+        return "Success"
+
+    except Exception as e:
+        print("Error:", str(e))
+        raise e
